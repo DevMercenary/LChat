@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use net::{derive_psk, human_size, FromNet, ToNet, PORT};
+use serde::{Deserialize, Serialize};
 
 /// Сколько секунд держим найденный пир в списке без нового маячка.
 const PEER_TTL: Duration = Duration::from_secs(8);
@@ -77,6 +78,57 @@ enum Kind {
     FileOut,
 }
 
+impl Kind {
+    fn code(&self) -> u8 {
+        match self {
+            Kind::Me => 0,
+            Kind::Peer => 1,
+            Kind::System => 2,
+            Kind::Error => 3,
+            Kind::FileIn => 4,
+            Kind::FileOut => 5,
+        }
+    }
+    fn from_code(c: u8) -> Kind {
+        match c {
+            0 => Kind::Me,
+            1 => Kind::Peer,
+            3 => Kind::Error,
+            4 => Kind::FileIn,
+            5 => Kind::FileOut,
+            _ => Kind::System,
+        }
+    }
+}
+
+/// Одна сохранённая на диск запись чата.
+#[derive(Serialize, Deserialize)]
+struct StoredEntry {
+    kind: u8,
+    text: String,
+    #[serde(default)]
+    path: Option<String>,
+}
+
+/// Сохраняемые на диск настройки и история чата.
+#[derive(Serialize, Deserialize, Default)]
+struct Config {
+    #[serde(default)]
+    peer_ip: String,
+    #[serde(default)]
+    remember_password: bool,
+    #[serde(default)]
+    password: String,
+    #[serde(default = "default_true")]
+    save_history: bool,
+    #[serde(default)]
+    history: Vec<StoredEntry>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
 /// Тип встроенного предпросмотра для файла.
 enum Preview {
     None,
@@ -95,10 +147,10 @@ struct Entry {
 /// Содержимое буфера обмена, ожидающее подтверждения перед отправкой.
 #[derive(Clone)]
 enum Pending {
-    /// Картинка из буфера, уже сохранённая во временный PNG.
+    /// Картинка (растр) из буфера, уже сохранённая во временный PNG.
     Image(PathBuf),
-    /// Существующий файл, путь к которому лежал в буфере.
-    File(PathBuf),
+    /// Один или несколько существующих файлов, скопированных в буфер.
+    Files(Vec<PathBuf>),
 }
 
 struct App {
@@ -120,28 +172,62 @@ struct App {
     pending: Option<Pending>,
     /// Включён ли автозапуск при старте системы.
     autostart: bool,
+    /// Сохранять историю чата на диск.
+    save_history: bool,
+    /// Запоминать пароль в конфиге (в открытом виде).
+    remember_password: bool,
+    /// Есть несохранённые изменения настроек/истории.
+    dirty: bool,
+    /// Когда последний раз сохраняли конфиг (для троттлинга записи).
+    last_save: Instant,
 }
 
 impl App {
     fn new() -> Self {
         let downloads = default_downloads();
-        let (to_net, from_net) = net::spawn(downloads.clone(), derive_psk(""));
+        let cfg = load_config();
+        let passphrase = if cfg.remember_password {
+            cfg.password.clone()
+        } else {
+            String::new()
+        };
+        let (to_net, from_net) = net::spawn(downloads.clone(), derive_psk(&passphrase));
+        // Восстанавливаем историю чата.
+        let mut log = Vec::new();
+        for e in &cfg.history {
+            let path = e.path.as_ref().map(PathBuf::from);
+            let kind = Kind::from_code(e.kind);
+            let preview = match (&kind, &path) {
+                (Kind::FileIn | Kind::FileOut, Some(p)) => classify_preview(p),
+                _ => Preview::None,
+            };
+            log.push(Entry {
+                kind,
+                text: e.text.clone(),
+                path,
+                preview,
+            });
+        }
         App {
             to_net,
             from_net,
-            peer_ip: String::new(),
+            peer_ip: cfg.peer_ip.clone(),
             input: String::new(),
-            log: Vec::new(),
+            log,
             status: "Запуск…".to_string(),
             connected: None,
             local_ips: list_local_ips(),
             downloads,
-            passphrase: String::new(),
-            last_psk: String::new(),
+            last_psk: passphrase.clone(),
+            passphrase,
             peers: HashMap::new(),
             previews_tex: HashMap::new(),
             pending: None,
             autostart: autostart_enabled(),
+            save_history: cfg.save_history,
+            remember_password: cfg.remember_password,
+            dirty: false,
+            last_save: Instant::now(),
         }
     }
 
@@ -156,6 +242,46 @@ impl App {
             path,
             preview,
         });
+        if self.save_history {
+            self.dirty = true;
+        }
+    }
+
+    /// Собирает текущий конфиг из состояния приложения.
+    fn build_config(&self) -> Config {
+        let history = if self.save_history {
+            self.log
+                .iter()
+                .map(|e| StoredEntry {
+                    kind: e.kind.code(),
+                    text: e.text.clone(),
+                    path: e.path.as_ref().map(|p| p.display().to_string()),
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Config {
+            peer_ip: self.peer_ip.clone(),
+            remember_password: self.remember_password,
+            password: if self.remember_password {
+                self.passphrase.clone()
+            } else {
+                String::new()
+            },
+            save_history: self.save_history,
+            history,
+        }
+    }
+
+    /// Немедленно сохраняет конфиг на диск и сбрасывает флаг изменений.
+    fn save_now(&mut self) {
+        let cfg = self.build_config();
+        if let Err(e) = save_config(&cfg) {
+            eprintln!("LChat: не удалось сохранить конфиг: {e}");
+        }
+        self.dirty = false;
+        self.last_save = Instant::now();
     }
 
     fn send_text(&mut self) {
@@ -252,6 +378,13 @@ impl App {
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.drain_net();
+        // Сохраняем конфиг: сразу при закрытии окна, иначе не чаще раза в ~700 мс.
+        let closing = ctx.input(|i| i.viewport().close_requested());
+        if self.dirty
+            && (closing || self.last_save.elapsed() >= Duration::from_millis(700))
+        {
+            self.save_now();
+        }
         // Регулярно перерисовываемся, чтобы входящие сообщения появлялись без действий пользователя.
         ctx.request_repaint_after(Duration::from_millis(150));
     }
@@ -289,6 +422,9 @@ impl eframe::App for App {
                         .hint_text("например 192.168.1.42")
                         .desired_width(160.0),
                 );
+                if resp.changed() {
+                    self.dirty = true;
+                }
                 let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if ui.button("Подключиться").clicked() || enter {
                     let ip = self.peer_ip.trim().to_string();
@@ -302,12 +438,22 @@ impl eframe::App for App {
             });
             ui.horizontal(|ui| {
                 ui.label("Пароль (одинаковый на обоих):");
-                ui.add(
+                let resp = ui.add(
                     egui::TextEdit::singleline(&mut self.passphrase)
                         .password(true)
                         .desired_width(180.0)
                         .hint_text("общий секрет для шифрования"),
                 );
+                if resp.changed() && self.remember_password {
+                    self.dirty = true;
+                }
+                if ui
+                    .checkbox(&mut self.remember_password, "запоминать")
+                    .on_hover_text("Сохранять пароль в конфиге в открытом виде")
+                    .changed()
+                {
+                    self.dirty = true;
+                }
             });
             ui.add_space(2.0);
             ui.horizontal_wrapped(|ui| {
@@ -338,7 +484,7 @@ impl eframe::App for App {
                     }
                 });
             }
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 let mut want = self.autostart;
                 if ui
                     .checkbox(&mut want, "Запускать при старте системы")
@@ -357,6 +503,27 @@ impl eframe::App for App {
                         }
                         Err(e) => self.push(Kind::Error, format!("Автозапуск: {e}"), None),
                     }
+                }
+                ui.separator();
+                if ui
+                    .checkbox(&mut self.save_history, "Сохранять историю чата")
+                    .on_hover_text("История чата сохраняется на диск и восстанавливается при запуске")
+                    .changed()
+                {
+                    // При выключении удаляем историю из конфига, при включении — запишем текущую.
+                    self.dirty = true;
+                    self.save_now();
+                }
+                ui.separator();
+                if ui
+                    .button("🧹 Очистить чат")
+                    .on_hover_text("Удаляет все сообщения из окна и из сохранённой истории")
+                    .clicked()
+                {
+                    self.log.clear();
+                    self.previews_tex.clear();
+                    self.dirty = true;
+                    self.save_now();
                 }
             });
             ui.add_space(4.0);
@@ -554,15 +721,36 @@ impl eframe::App for App {
                             ui.weak("(не удалось показать предпросмотр)");
                         }
                     }
-                    Pending::File(p) => {
-                        let name = p
-                            .file_name()
-                            .map(|n| n.to_string_lossy().to_string())
-                            .unwrap_or_default();
-                        let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-                        ui.label("Файл из буфера:");
-                        ui.monospace(format!("{name}  ({})", human_size(size)));
-                        ui.weak(p.display().to_string());
+                    Pending::Files(paths) => {
+                        if paths.len() == 1 {
+                            ui.label("Файл из буфера:");
+                        } else {
+                            ui.label(format!("Файлы из буфера ({}):", paths.len()));
+                        }
+                        // Для одиночной картинки-файла покажем миниатюру.
+                        if paths.len() == 1 && matches!(classify_preview(&paths[0]), Preview::Image) {
+                            let p = &paths[0];
+                            let tex = self
+                                .previews_tex
+                                .entry(p.clone())
+                                .or_insert_with(|| load_preview_texture(&ctx, p, false));
+                            if let Some(t) = tex {
+                                ui.add(
+                                    egui::Image::new(&*t)
+                                        .max_width(380.0)
+                                        .max_height(300.0)
+                                        .corner_radius(4.0),
+                                );
+                            }
+                        }
+                        for p in paths {
+                            let name = p
+                                .file_name()
+                                .map(|n| n.to_string_lossy().to_string())
+                                .unwrap_or_default();
+                            let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+                            ui.monospace(format!("• {name}  ({})", human_size(size)));
+                        }
                     }
                 }
                 ui.add_space(8.0);
@@ -581,10 +769,14 @@ impl eframe::App for App {
                 cancel = true;
             }
             if send {
-                let path = match pending {
-                    Pending::Image(p) | Pending::File(p) => p,
-                };
-                self.send_file_path(path);
+                match pending {
+                    Pending::Image(p) => self.send_file_path(p),
+                    Pending::Files(paths) => {
+                        for p in paths {
+                            self.send_file_path(p);
+                        }
+                    }
+                }
                 self.pending = None;
             } else if cancel {
                 self.pending = None;
@@ -719,30 +911,151 @@ fn open_path(path: &std::path::Path) {
     let _ = std::process::Command::new("open").arg(path).spawn();
 }
 
-/// Читает буфер обмена: сначала картинку, затем путь к существующему файлу.
+/// Читает буфер обмена: сначала растровую картинку, затем список файлов
+/// (скопированных в файловом менеджере), затем путь к файлу текстом.
 /// Картинку сохраняет во временный PNG. Ничего не отправляет — только готовит к подтверждению.
 fn read_clipboard() -> Result<Pending, String> {
-    let mut cb = arboard::Clipboard::new().map_err(|e| format!("буфер недоступен: {e}"))?;
-    if let Ok(img) = cb.get_image() {
-        let (w, h) = (img.width as u32, img.height as u32);
-        let buf = image::RgbaImage::from_raw(w, h, img.bytes.into_owned())
-            .ok_or_else(|| "не удалось прочитать картинку из буфера".to_string())?;
-        let path = temp_paste_path("png");
-        buf.save(&path)
-            .map_err(|e| format!("не удалось сохранить картинку: {e}"))?;
-        return Ok(Pending::Image(path));
+    // 1) Растровая картинка (скриншот, «копировать изображение»).
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        if let Ok(img) = cb.get_image() {
+            let (w, h) = (img.width as u32, img.height as u32);
+            let buf = image::RgbaImage::from_raw(w, h, img.bytes.into_owned())
+                .ok_or_else(|| "не удалось прочитать картинку из буфера".to_string())?;
+            let path = temp_paste_path("png");
+            buf.save(&path)
+                .map_err(|e| format!("не удалось сохранить картинку: {e}"))?;
+            return Ok(Pending::Image(path));
+        }
     }
-    if let Ok(text) = cb.get_text() {
-        let t = text.trim();
-        // Берём первую строку и снимаем возможный префикс file:// (drag из файлменеджеров).
-        let first = t.lines().next().unwrap_or("").trim();
-        let cleaned = first.strip_prefix("file://").unwrap_or(first);
-        let p = PathBuf::from(cleaned);
-        if p.is_file() {
-            return Ok(Pending::File(p));
+    // 2) Список файлов из файлового менеджера (uri-list). На Linux/Wayland arboard
+    //    этот формат не отдаёт — читаем через wl-paste / xclip.
+    #[cfg(target_os = "linux")]
+    {
+        let files = clipboard_files_linux();
+        if !files.is_empty() {
+            return Ok(Pending::Files(files));
+        }
+    }
+    // 3) Путь к файлу простым текстом.
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        if let Ok(text) = cb.get_text() {
+            let files: Vec<PathBuf> = parse_uri_list(&text);
+            if !files.is_empty() {
+                return Ok(Pending::Files(files));
+            }
         }
     }
     Err("В буфере нет картинки или пути к файлу".to_string())
+}
+
+/// Читает список скопированных файлов из буфера на Linux через внешние утилиты.
+/// Пробует Wayland (`wl-paste`) и X11 (`xclip`), форматы `text/uri-list` и
+/// `x-special/gnome-copied-files`.
+#[cfg(target_os = "linux")]
+fn clipboard_files_linux() -> Vec<PathBuf> {
+    // (программа, аргументы) для чтения конкретного MIME-типа.
+    let attempts: [(&str, &[&str]); 4] = [
+        ("wl-paste", &["-n", "-t", "text/uri-list"]),
+        ("wl-paste", &["-n", "-t", "x-special/gnome-copied-files"]),
+        ("xclip", &["-selection", "clipboard", "-t", "text/uri-list", "-o"]),
+        ("xclip", &["-selection", "clipboard", "-t", "x-special/gnome-copied-files", "-o"]),
+    ];
+    for (prog, args) in attempts {
+        let out = std::process::Command::new(prog)
+            .args(args)
+            .stderr(std::process::Stdio::null())
+            .output();
+        if let Ok(out) = out {
+            if out.status.success() && !out.stdout.is_empty() {
+                let text = String::from_utf8_lossy(&out.stdout);
+                let files = parse_uri_list(&text);
+                if !files.is_empty() {
+                    return files;
+                }
+            }
+        }
+    }
+    Vec::new()
+}
+
+/// Разбирает содержимое uri-list / gnome-copied-files в существующие пути к файлам.
+/// Поддерживает `file://`-URI с percent-кодированием и служебные строки `copy`/`cut`/`#…`.
+fn parse_uri_list(text: &str) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') || line == "copy" || line == "cut" {
+            continue;
+        }
+        let candidate = if let Some(rest) = line.strip_prefix("file://") {
+            // file://host/path — host обычно пустой, убираем до первого '/'.
+            let path_part = match rest.find('/') {
+                Some(i) => &rest[i..],
+                None => rest,
+            };
+            percent_decode(path_part)
+        } else {
+            line.to_string()
+        };
+        let p = PathBuf::from(candidate);
+        if p.is_file() {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// Декодирует percent-encoding (`%20`, кириллица в UTF-8 и т.п.) в строку.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push((hi * 16 + lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Путь к файлу конфига: ~/.config/lchat/config.json (Linux) или %APPDATA%\lchat (Windows).
+fn config_path() -> PathBuf {
+    let base = if cfg!(target_os = "windows") {
+        std::env::var_os("APPDATA").map(PathBuf::from)
+    } else {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+    };
+    base.unwrap_or_else(|| PathBuf::from("."))
+        .join("lchat")
+        .join("config.json")
+}
+
+/// Загружает конфиг с диска (или значения по умолчанию, если файла нет/битый).
+fn load_config() -> Config {
+    match std::fs::read(config_path()) {
+        Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_default(),
+        Err(_) => Config::default(),
+    }
+}
+
+/// Сохраняет конфиг на диск (создаёт каталог при необходимости).
+fn save_config(cfg: &Config) -> Result<(), String> {
+    let path = config_path();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_vec_pretty(cfg).map_err(|e| e.to_string())?;
+    std::fs::write(&path, json).map_err(|e| e.to_string())
 }
 
 /// Уникальный путь во временной папке для вставленной из буфера картинки.
@@ -855,6 +1168,92 @@ mod tests {
             _ => panic!("ожидался текстовый предпросмотр"),
         }
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn percent_decode_handles_spaces_and_utf8() {
+        assert_eq!(percent_decode("a%20b"), "a b");
+        // %D0%A4 = "Ф" в UTF-8.
+        assert_eq!(percent_decode("%D0%A4"), "Ф");
+        assert_eq!(percent_decode("no-encoding"), "no-encoding");
+        // Некорректная последовательность остаётся как есть.
+        assert_eq!(percent_decode("100%zz"), "100%zz");
+    }
+
+    #[test]
+    fn parse_uri_list_reads_gnome_and_uri_formats() {
+        // Реальный существующий файл во временной папке.
+        let name = "lchat uri тест.txt";
+        let file = std::env::temp_dir().join(name);
+        std::fs::write(&file, "x").unwrap();
+        let enc = file
+            .display()
+            .to_string()
+            .replace(' ', "%20")
+            .replace("тест", "%D1%82%D0%B5%D1%81%D1%82");
+        // gnome-copied-files: строка copy + file://.
+        let gnome = format!("copy\nfile://{enc}\n");
+        let got = parse_uri_list(&gnome);
+        assert_eq!(got, vec![file.clone()]);
+        // uri-list с комментарием.
+        let uri = format!("# comment\r\nfile://{enc}\r\n");
+        assert_eq!(parse_uri_list(&uri), vec![file.clone()]);
+        // Несуществующий файл отбрасывается.
+        assert!(parse_uri_list("file:///nope/nope-12345.bin").is_empty());
+        let _ = std::fs::remove_file(&file);
+    }
+
+    #[test]
+    fn config_json_roundtrips() {
+        let cfg = Config {
+            peer_ip: "192.168.1.5".into(),
+            remember_password: true,
+            password: "секрет".into(),
+            save_history: true,
+            history: vec![StoredEntry {
+                kind: Kind::Peer.code(),
+                text: "привет".into(),
+                path: None,
+            }],
+        };
+        let json = serde_json::to_vec(&cfg).unwrap();
+        let back: Config = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back.peer_ip, "192.168.1.5");
+        assert!(back.remember_password && back.save_history);
+        assert_eq!(back.password, "секрет");
+        assert_eq!(back.history.len(), 1);
+        assert_eq!(back.history[0].text, "привет");
+        // Отсутствующие поля берут значения по умолчанию (save_history=true).
+        let minimal: Config = serde_json::from_str("{}").unwrap();
+        assert!(minimal.save_history);
+        assert!(minimal.peer_ip.is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "требует живой Wayland-сессии с wl-copy/wl-paste"]
+    fn wayland_clipboard_files_roundtrip() {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let file = std::env::temp_dir().join("lchat wl test.txt");
+        std::fs::write(&file, "y").unwrap();
+        let enc = file.display().to_string().replace(' ', "%20");
+        let payload = format!("copy\nfile://{enc}\n");
+        let mut child = Command::new("wl-copy")
+            .args(["-t", "x-special/gnome-copied-files"])
+            .stdin(Stdio::piped())
+            .spawn()
+            .expect("wl-copy");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.as_bytes())
+            .unwrap();
+        child.wait().unwrap();
+        let got = clipboard_files_linux();
+        assert!(got.contains(&file), "ожидали {file:?} в {got:?}");
+        let _ = std::fs::remove_file(&file);
     }
 
     #[test]
