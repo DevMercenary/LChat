@@ -4,12 +4,16 @@
 
 mod net;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use eframe::egui;
-use net::{human_size, FromNet, ToNet, PORT};
+use net::{derive_psk, human_size, FromNet, ToNet, PORT};
+
+/// Сколько секунд держим найденный пир в списке без нового маячка.
+const PEER_TTL: Duration = Duration::from_secs(8);
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -88,12 +92,15 @@ struct App {
     connected: Option<String>,
     local_ips: Vec<String>,
     downloads: PathBuf,
+    passphrase: String,
+    last_psk: String,
+    peers: HashMap<String, (String, Instant)>,
 }
 
 impl App {
     fn new() -> Self {
         let downloads = default_downloads();
-        let (to_net, from_net) = net::spawn(downloads.clone());
+        let (to_net, from_net) = net::spawn(downloads.clone(), derive_psk(""));
         App {
             to_net,
             from_net,
@@ -104,6 +111,9 @@ impl App {
             connected: None,
             local_ips: list_local_ips(),
             downloads,
+            passphrase: String::new(),
+            last_psk: String::new(),
+            peers: HashMap::new(),
         }
     }
 
@@ -161,6 +171,9 @@ impl App {
                     format!("Получен файл: {name} ({})", human_size(size)),
                     Some(path),
                 ),
+                FromNet::Discovered { name, ip } => {
+                    self.peers.insert(ip, (name, Instant::now()));
+                }
                 FromNet::Error(e) => {
                     self.push(Kind::Error, e.clone(), None);
                     self.status = e;
@@ -178,6 +191,16 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Пароль изменился -> пересобираем PSK для будущих соединений.
+        if self.passphrase != self.last_psk {
+            let _ = self.to_net.send(ToNet::SetPsk(derive_psk(&self.passphrase)));
+            self.last_psk = self.passphrase.clone();
+        }
+        // Убираем протухшие найденные пиры.
+        let now = Instant::now();
+        self.peers
+            .retain(|_, (_, seen)| now.duration_since(*seen) < PEER_TTL);
+
         egui::Panel::top("conn").show(ui, |ui| {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -198,6 +221,15 @@ impl eframe::App for App {
                     let _ = self.to_net.send(ToNet::Disconnect);
                 }
             });
+            ui.horizontal(|ui| {
+                ui.label("Пароль (одинаковый на обоих):");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.passphrase)
+                        .password(true)
+                        .desired_width(180.0)
+                        .hint_text("общий секрет для шифрования"),
+                );
+            });
             ui.add_space(2.0);
             ui.horizontal_wrapped(|ui| {
                 let dot = if self.connected.is_some() { "🟢" } else { "⚪" };
@@ -211,6 +243,22 @@ impl eframe::App for App {
                     ui.monospace(format!("{}  (порт {PORT})", self.local_ips.join(", ")));
                 }
             });
+            let mut found: Vec<(String, String)> = self
+                .peers
+                .iter()
+                .map(|(ip, (name, _))| (ip.clone(), name.clone()))
+                .collect();
+            found.sort();
+            if !found.is_empty() {
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Найдены в сети:");
+                    for (ip, name) in &found {
+                        if ui.button(format!("🖧 {name} ({ip})")).clicked() {
+                            let _ = self.to_net.send(ToNet::Connect(ip.clone()));
+                        }
+                    }
+                });
+            }
             ui.add_space(4.0);
         });
 
