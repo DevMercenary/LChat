@@ -20,6 +20,7 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([720.0, 620.0])
             .with_min_inner_size([460.0, 380.0])
+            .with_drag_and_drop(true) // важно для Windows
             .with_title("LChat — локальный чат"),
         ..Default::default()
     };
@@ -162,13 +163,30 @@ impl App {
             return;
         }
         if let Some(path) = rfd::FileDialog::new().pick_file() {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let _ = self.to_net.send(ToNet::SendFile(path.clone()));
-            self.push(Kind::FileOut, format!("Отправка файла: {name}"), Some(path));
+            self.send_file_path(path);
         }
+    }
+
+    /// Отправляет один файл по пути (из диалога или drag-&-drop).
+    fn send_file_path(&mut self, path: PathBuf) {
+        if self.connected.is_none() {
+            self.push(Kind::Error, "Нет соединения — сначала подключитесь".into(), None);
+            return;
+        }
+        if path.is_dir() {
+            self.push(
+                Kind::Error,
+                format!("Папки отправлять нельзя: {}", path.display()),
+                None,
+            );
+            return;
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let _ = self.to_net.send(ToNet::SendFile(path.clone()));
+        self.push(Kind::FileOut, format!("Отправка файла: {name}"), Some(path));
     }
 
     fn drain_net(&mut self) {
@@ -221,6 +239,19 @@ impl eframe::App for App {
         let now = Instant::now();
         self.peers
             .retain(|_, (_, seen)| now.duration_since(*seen) < PEER_TTL);
+
+        // Drag-&-drop: отправляем брошенные в окно файлы.
+        let dropped: Vec<PathBuf> = ui.ctx().input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .filter_map(|f| f.path.clone())
+                .collect()
+        });
+        for path in dropped {
+            self.send_file_path(path);
+        }
+        let files_hovering = ui.ctx().input(|i| !i.raw.hovered_files.is_empty());
 
         egui::Panel::top("conn").show(ui, |ui| {
             ui.add_space(4.0);
@@ -414,6 +445,20 @@ impl eframe::App for App {
                         open_path(&p);
                     }
                 });
+
+            // Подсветка зоны при перетаскивании файлов в окно.
+            if files_hovering {
+                let rect = ui.clip_rect();
+                let painter = ui.painter();
+                painter.rect_filled(rect, 0.0, egui::Color32::from_black_alpha(160));
+                painter.text(
+                    rect.center(),
+                    egui::Align2::CENTER_CENTER,
+                    "📥 Отпустите файлы — отправлю собеседнику",
+                    egui::FontId::proportional(22.0),
+                    egui::Color32::WHITE,
+                );
+            }
         });
     }
 }
