@@ -2250,6 +2250,7 @@ dependencies = [
 name = "lchat"
 version = "0.1.0"
 dependencies = [
+ "arboard",
  "eframe",
  "image",
  "local-ip-address",

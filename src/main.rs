@@ -92,6 +92,15 @@ struct Entry {
     preview: Preview,
 }
 
+/// Содержимое буфера обмена, ожидающее подтверждения перед отправкой.
+#[derive(Clone)]
+enum Pending {
+    /// Картинка из буфера, уже сохранённая во временный PNG.
+    Image(PathBuf),
+    /// Существующий файл, путь к которому лежал в буфере.
+    File(PathBuf),
+}
+
 struct App {
     to_net: Sender<ToNet>,
     from_net: Receiver<FromNet>,
@@ -107,6 +116,10 @@ struct App {
     peers: HashMap<String, (String, Instant)>,
     /// Кэш текстур предпросмотра (картинки и кадры видео). None = не удалось.
     previews_tex: HashMap<PathBuf, Option<egui::TextureHandle>>,
+    /// Содержимое буфера, ожидающее подтверждения перед отправкой.
+    pending: Option<Pending>,
+    /// Включён ли автозапуск при старте системы.
+    autostart: bool,
 }
 
 impl App {
@@ -127,6 +140,8 @@ impl App {
             last_psk: String::new(),
             peers: HashMap::new(),
             previews_tex: HashMap::new(),
+            pending: None,
+            autostart: autostart_enabled(),
         }
     }
 
@@ -187,6 +202,18 @@ impl App {
             .unwrap_or_default();
         let _ = self.to_net.send(ToNet::SendFile(path.clone()));
         self.push(Kind::FileOut, format!("Отправка файла: {name}"), Some(path));
+    }
+
+    /// Читает буфер обмена (картинка или путь к файлу) и ставит его на подтверждение.
+    fn try_paste(&mut self) {
+        if self.connected.is_none() {
+            self.push(Kind::Error, "Нет соединения — сначала подключитесь".into(), None);
+            return;
+        }
+        match read_clipboard() {
+            Ok(pending) => self.pending = Some(pending),
+            Err(e) => self.push(Kind::System, e, None),
+        }
     }
 
     fn drain_net(&mut self) {
@@ -311,9 +338,31 @@ impl eframe::App for App {
                     }
                 });
             }
+            ui.horizontal(|ui| {
+                let mut want = self.autostart;
+                if ui
+                    .checkbox(&mut want, "Запускать при старте системы")
+                    .on_hover_text("Добавляет LChat в автозапуск текущего пользователя")
+                    .changed()
+                {
+                    match set_autostart(want) {
+                        Ok(()) => {
+                            self.autostart = want;
+                            let msg = if want {
+                                "Автозапуск включён"
+                            } else {
+                                "Автозапуск выключен"
+                            };
+                            self.push(Kind::System, msg.into(), None);
+                        }
+                        Err(e) => self.push(Kind::Error, format!("Автозапуск: {e}"), None),
+                    }
+                }
+            });
             ui.add_space(4.0);
         });
 
+        let mut compose_focused = false;
         egui::Panel::bottom("compose").show(ui, |ui| {
             ui.add_space(4.0);
             let resp = ui.add(
@@ -322,7 +371,8 @@ impl eframe::App for App {
                     .desired_rows(3)
                     .desired_width(f32::INFINITY),
             );
-            let ctrl_enter = resp.has_focus()
+            compose_focused = resp.has_focus();
+            let ctrl_enter = compose_focused
                 && ui.input(|i| i.key_pressed(egui::Key::Enter) && i.modifiers.command);
             ui.horizontal(|ui| {
                 if ui.button("Отправить").clicked() || ctrl_enter {
@@ -331,6 +381,13 @@ impl eframe::App for App {
                 if ui.button("📎 Файл…").clicked() {
                     self.pick_and_send_file();
                 }
+                if ui
+                    .button("📋 Из буфера")
+                    .on_hover_text("Отправить картинку или файл из буфера обмена (спросит подтверждение)")
+                    .clicked()
+                {
+                    self.try_paste();
+                }
                 ui.separator();
                 if ui.button("🗀 Папка приёма").clicked() {
                     open_path(&self.downloads);
@@ -338,6 +395,15 @@ impl eframe::App for App {
             });
             ui.add_space(4.0);
         });
+
+        // Ctrl+V вне поля ввода — вставка картинки/файла из буфера (в самом поле работает
+        // нативная вставка текста, её не перехватываем).
+        if !compose_focused
+            && self.pending.is_none()
+            && ui.input(|i| i.key_pressed(egui::Key::V) && i.modifiers.command)
+        {
+            self.try_paste();
+        }
 
         egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical()
@@ -460,6 +526,70 @@ impl eframe::App for App {
                 );
             }
         });
+
+        // Диалог подтверждения отправки из буфера обмена.
+        if let Some(pending) = self.pending.clone() {
+            let ctx = ui.ctx().clone();
+            let mut send = false;
+            let mut cancel = false;
+            let resp = egui::Modal::new(egui::Id::new("paste-confirm")).show(&ctx, |ui| {
+                ui.set_max_width(420.0);
+                ui.heading("Отправить из буфера обмена?");
+                ui.add_space(6.0);
+                match &pending {
+                    Pending::Image(p) => {
+                        ui.label("Картинка из буфера:");
+                        let tex = self
+                            .previews_tex
+                            .entry(p.clone())
+                            .or_insert_with(|| load_preview_texture(&ctx, p, false));
+                        if let Some(t) = tex {
+                            ui.add(
+                                egui::Image::new(&*t)
+                                    .max_width(380.0)
+                                    .max_height(300.0)
+                                    .corner_radius(4.0),
+                            );
+                        } else {
+                            ui.weak("(не удалось показать предпросмотр)");
+                        }
+                    }
+                    Pending::File(p) => {
+                        let name = p
+                            .file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+                        ui.label("Файл из буфера:");
+                        ui.monospace(format!("{name}  ({})", human_size(size)));
+                        ui.weak(p.display().to_string());
+                    }
+                }
+                ui.add_space(8.0);
+                ui.label("Это точно то, что нужно отправить?");
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button("✅ Отправить").clicked() {
+                        send = true;
+                    }
+                    if ui.button("Отмена").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+            if resp.should_close() {
+                cancel = true;
+            }
+            if send {
+                let path = match pending {
+                    Pending::Image(p) | Pending::File(p) => p,
+                };
+                self.send_file_path(path);
+                self.pending = None;
+            } else if cancel {
+                self.pending = None;
+            }
+        }
     }
 }
 
@@ -589,6 +719,119 @@ fn open_path(path: &std::path::Path) {
     let _ = std::process::Command::new("open").arg(path).spawn();
 }
 
+/// Читает буфер обмена: сначала картинку, затем путь к существующему файлу.
+/// Картинку сохраняет во временный PNG. Ничего не отправляет — только готовит к подтверждению.
+fn read_clipboard() -> Result<Pending, String> {
+    let mut cb = arboard::Clipboard::new().map_err(|e| format!("буфер недоступен: {e}"))?;
+    if let Ok(img) = cb.get_image() {
+        let (w, h) = (img.width as u32, img.height as u32);
+        let buf = image::RgbaImage::from_raw(w, h, img.bytes.into_owned())
+            .ok_or_else(|| "не удалось прочитать картинку из буфера".to_string())?;
+        let path = temp_paste_path("png");
+        buf.save(&path)
+            .map_err(|e| format!("не удалось сохранить картинку: {e}"))?;
+        return Ok(Pending::Image(path));
+    }
+    if let Ok(text) = cb.get_text() {
+        let t = text.trim();
+        // Берём первую строку и снимаем возможный префикс file:// (drag из файлменеджеров).
+        let first = t.lines().next().unwrap_or("").trim();
+        let cleaned = first.strip_prefix("file://").unwrap_or(first);
+        let p = PathBuf::from(cleaned);
+        if p.is_file() {
+            return Ok(Pending::File(p));
+        }
+    }
+    Err("В буфере нет картинки или пути к файлу".to_string())
+}
+
+/// Уникальный путь во временной папке для вставленной из буфера картинки.
+fn temp_paste_path(ext: &str) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let n = N.fetch_add(1, Ordering::Relaxed);
+    let pid = std::process::id();
+    std::env::temp_dir().join(format!("lchat-paste-{pid}-{n}.{ext}"))
+}
+
+// ---- Автозапуск при старте системы (по пользователю, без прав администратора) ----
+
+#[cfg(target_os = "linux")]
+fn autostart_desktop_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    Some(base.join("autostart").join("lchat.desktop"))
+}
+
+#[cfg(target_os = "linux")]
+fn autostart_enabled() -> bool {
+    autostart_desktop_path().map(|p| p.exists()).unwrap_or(false)
+}
+
+#[cfg(target_os = "linux")]
+fn set_autostart(enable: bool) -> Result<(), String> {
+    let path = autostart_desktop_path().ok_or("не найден каталог настроек (~/.config)")?;
+    if enable {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        let content = format!(
+            "[Desktop Entry]\nType=Application\nName=LChat\nComment=Локальный P2P-чат\nExec={}\nTerminal=false\nX-GNOME-Autostart-enabled=true\n",
+            exe.display()
+        );
+        std::fs::write(&path, content).map_err(|e| e.to_string())?;
+    } else if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+const RUN_KEY: &str = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
+
+#[cfg(target_os = "windows")]
+fn autostart_enabled() -> bool {
+    std::process::Command::new("reg")
+        .args(["query", RUN_KEY, "/v", "LChat"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "windows")]
+fn set_autostart(enable: bool) -> Result<(), String> {
+    if enable {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let val = format!("\"{}\"", exe.display());
+        let status = std::process::Command::new("reg")
+            .args(["add", RUN_KEY, "/v", "LChat", "/t", "REG_SZ", "/d", &val, "/f"])
+            .status()
+            .map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err("не удалось записать ключ автозапуска".into());
+        }
+    } else {
+        let _ = std::process::Command::new("reg")
+            .args(["delete", RUN_KEY, "/v", "LChat", "/f"])
+            .status();
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn autostart_enabled() -> bool {
+    false
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "windows")))]
+fn set_autostart(_enable: bool) -> Result<(), String> {
+    Err("автозапуск не поддерживается на этой ОС".into())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -612,6 +855,37 @@ mod tests {
             _ => panic!("ожидался текстовый предпросмотр"),
         }
         let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn temp_paste_paths_are_unique() {
+        let a = temp_paste_path("png");
+        let b = temp_paste_path("png");
+        assert_ne!(a, b);
+        assert!(a.extension().unwrap() == "png");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn autostart_enable_disable_roundtrip() {
+        // Изолируем от реального ~/.config через XDG_CONFIG_HOME во временной папке.
+        let dir = std::env::temp_dir().join(format!("lchat-autostart-test-{}", std::process::id()));
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        let path = autostart_desktop_path().unwrap();
+        assert!(path.starts_with(&dir));
+
+        set_autostart(true).unwrap();
+        assert!(path.exists(), "desktop-файл должен создаться");
+        assert!(autostart_enabled());
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("[Desktop Entry]") && body.contains("Exec="));
+
+        set_autostart(false).unwrap();
+        assert!(!path.exists(), "desktop-файл должен удалиться");
+        assert!(!autostart_enabled());
+
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::remove_var("XDG_CONFIG_HOME");
     }
 
     #[test]
