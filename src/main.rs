@@ -5,7 +5,7 @@
 mod net;
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
@@ -76,10 +76,19 @@ enum Kind {
     FileOut,
 }
 
+/// Тип встроенного предпросмотра для файла.
+enum Preview {
+    None,
+    Image,
+    Video,
+    Text { body: String, truncated: bool },
+}
+
 struct Entry {
     kind: Kind,
     text: String,
     path: Option<PathBuf>,
+    preview: Preview,
 }
 
 struct App {
@@ -95,6 +104,8 @@ struct App {
     passphrase: String,
     last_psk: String,
     peers: HashMap<String, (String, Instant)>,
+    /// Кэш текстур предпросмотра (картинки и кадры видео). None = не удалось.
+    previews_tex: HashMap<PathBuf, Option<egui::TextureHandle>>,
 }
 
 impl App {
@@ -114,11 +125,21 @@ impl App {
             passphrase: String::new(),
             last_psk: String::new(),
             peers: HashMap::new(),
+            previews_tex: HashMap::new(),
         }
     }
 
     fn push(&mut self, kind: Kind, text: String, path: Option<PathBuf>) {
-        self.log.push(Entry { kind, text, path });
+        let preview = match (&kind, &path) {
+            (Kind::FileIn | Kind::FileOut, Some(p)) => classify_preview(p),
+            _ => Preview::None,
+        };
+        self.log.push(Entry {
+            kind,
+            text,
+            path,
+            preview,
+        });
     }
 
     fn send_text(&mut self) {
@@ -294,7 +315,7 @@ impl eframe::App for App {
                 .show(ui, |ui| {
                     let mut copy: Option<String> = None;
                     let mut open: Option<PathBuf> = None;
-                    for e in &self.log {
+                    for (idx, e) in self.log.iter().enumerate() {
                         let (tag, color) = match e.kind {
                             Kind::Me => ("Я", egui::Color32::from_rgb(90, 170, 255)),
                             Kind::Peer => ("Собеседник", egui::Color32::from_rgb(120, 220, 120)),
@@ -307,6 +328,64 @@ impl eframe::App for App {
                             ui.colored_label(color, format!("[{tag}]"));
                             ui.add(egui::Label::new(&e.text).wrap());
                         });
+
+                        // Встроенный предпросмотр файла.
+                        match &e.preview {
+                            Preview::Image | Preview::Video => {
+                                if let Some(p) = &e.path {
+                                    let is_video = matches!(e.preview, Preview::Video);
+                                    let tex = self
+                                        .previews_tex
+                                        .entry(p.clone())
+                                        .or_insert_with(|| {
+                                            load_preview_texture(ui.ctx(), p, is_video)
+                                        });
+                                    if let Some(t) = tex {
+                                        let resp = ui
+                                            .add(
+                                                egui::Image::new(&*t)
+                                                    .max_width(360.0)
+                                                    .max_height(280.0)
+                                                    .corner_radius(4.0),
+                                            )
+                                            .interact(egui::Sense::click());
+                                        let resp = if is_video {
+                                            ui.weak("▶ кадр видео — клик открывает в плеере");
+                                            resp
+                                        } else {
+                                            resp.on_hover_text("Открыть полностью")
+                                        };
+                                        if resp.clicked() {
+                                            open = Some(p.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            Preview::Text { body, truncated } => {
+                                egui::CollapsingHeader::new("📄 Предпросмотр текста")
+                                    .id_salt(idx)
+                                    .default_open(true)
+                                    .show(ui, |ui| {
+                                        egui::ScrollArea::vertical()
+                                            .id_salt(idx)
+                                            .max_height(220.0)
+                                            .auto_shrink([false, true])
+                                            .show(ui, |ui| {
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(body).monospace(),
+                                                    )
+                                                    .wrap(),
+                                                );
+                                            });
+                                        if *truncated {
+                                            ui.weak("… показано только начало файла");
+                                        }
+                                    });
+                            }
+                            Preview::None => {}
+                        }
+
                         ui.horizontal(|ui| {
                             if matches!(e.kind, Kind::Me | Kind::Peer)
                                 && ui.small_button("Копировать").clicked()
@@ -314,10 +393,15 @@ impl eframe::App for App {
                                 copy = Some(e.text.clone());
                             }
                             if let Some(p) = &e.path {
-                                if matches!(e.kind, Kind::FileIn)
-                                    && ui.small_button("Открыть файл").clicked()
-                                {
-                                    open = Some(p.clone());
+                                if matches!(e.kind, Kind::FileIn | Kind::FileOut) {
+                                    let label = if matches!(e.preview, Preview::Video) {
+                                        "▶ Открыть в плеере"
+                                    } else {
+                                        "Открыть"
+                                    };
+                                    if ui.small_button(label).clicked() {
+                                        open = Some(p.clone());
+                                    }
                                 }
                             }
                         });
@@ -361,6 +445,89 @@ fn list_local_ips() -> Vec<String> {
     out
 }
 
+/// Определяет тип предпросмотра по расширению файла (для текста — читает содержимое).
+fn classify_preview(path: &Path) -> Preview {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    const IMG: &[&str] = &["png", "jpg", "jpeg", "gif", "bmp", "webp", "ico", "tiff", "tif"];
+    const VID: &[&str] = &["mp4", "mkv", "webm", "mov", "avi", "m4v", "wmv", "flv"];
+    const TXT: &[&str] = &[
+        "txt", "md", "markdown", "log", "json", "csv", "tsv", "xml", "html", "htm", "toml",
+        "yaml", "yml", "ini", "cfg", "conf", "rs", "py", "c", "h", "cpp", "hpp", "cc", "js",
+        "ts", "jsx", "tsx", "go", "java", "kt", "rb", "php", "sh", "bash", "zsh", "sql", "css",
+        "scss", "tex", "srt", "vtt",
+    ];
+    if IMG.contains(&ext.as_str()) {
+        return Preview::Image;
+    }
+    if VID.contains(&ext.as_str()) {
+        return Preview::Video;
+    }
+    if TXT.contains(&ext.as_str()) {
+        const LIMIT: usize = 64 * 1024;
+        if let Ok(bytes) = std::fs::read(path) {
+            let truncated = bytes.len() > LIMIT;
+            let end = bytes.len().min(LIMIT);
+            let body = String::from_utf8_lossy(&bytes[..end]).to_string();
+            return Preview::Text { body, truncated };
+        }
+    }
+    Preview::None
+}
+
+/// Загружает текстуру предпросмотра: для картинки — сам файл, для видео — кадр из ffmpeg.
+fn load_preview_texture(
+    ctx: &egui::Context,
+    path: &Path,
+    is_video: bool,
+) -> Option<egui::TextureHandle> {
+    let src = if is_video {
+        video_thumb(path)?
+    } else {
+        path.to_path_buf()
+    };
+    let img = image::ImageReader::open(&src)
+        .ok()?
+        .with_guessed_format()
+        .ok()?
+        .decode()
+        .ok()?;
+    let img = img.thumbnail(1024, 1024);
+    let rgba = img.to_rgba8();
+    let size = [rgba.width() as usize, rgba.height() as usize];
+    let color = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+    Some(ctx.load_texture(format!("prev:{}", src.display()), color, egui::TextureOptions::LINEAR))
+}
+
+/// Извлекает кадр видео в PNG через ffmpeg (кэшируется во временной папке).
+fn video_thumb(path: &Path) -> Option<PathBuf> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut h);
+    let out = std::env::temp_dir().join(format!("lchat-thumb-{:x}.png", h.finish()));
+    if out.exists() {
+        return Some(out);
+    }
+    for seek in ["1", "0"] {
+        let status = std::process::Command::new("ffmpeg")
+            .args(["-y", "-ss", seek, "-i"])
+            .arg(path)
+            .args(["-frames:v", "1", "-vf", "scale=360:-1"])
+            .arg(&out)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .ok()?;
+        if status.success() && out.exists() {
+            return Some(out);
+        }
+    }
+    None
+}
+
 /// Открывает файл или папку системным способом.
 fn open_path(path: &std::path::Path) {
     let dir = if path.is_dir() {
@@ -375,4 +542,56 @@ fn open_path(path: &std::path::Path) {
     let _ = std::process::Command::new("xdg-open").arg(path).spawn();
     #[cfg(target_os = "macos")]
     let _ = std::process::Command::new("open").arg(path).spawn();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classify_by_extension() {
+        assert!(matches!(classify_preview(Path::new("photo.PNG")), Preview::Image));
+        assert!(matches!(classify_preview(Path::new("clip.mp4")), Preview::Video));
+        assert!(matches!(classify_preview(Path::new("data.bin")), Preview::None));
+    }
+
+    #[test]
+    fn text_preview_reads_content() {
+        let p = std::env::temp_dir().join("lchat-classify-test.md");
+        std::fs::write(&p, "# привет\nмир").unwrap();
+        match classify_preview(&p) {
+            Preview::Text { body, truncated } => {
+                assert!(body.contains("привет"));
+                assert!(!truncated);
+            }
+            _ => panic!("ожидался текстовый предпросмотр"),
+        }
+        let _ = std::fs::remove_file(&p);
+    }
+
+    #[test]
+    fn video_thumbnail_extracted_and_decodable() {
+        use std::process::Stdio;
+        let vid = std::env::temp_dir().join("lchat-vidsrc-test.mp4");
+        let made = std::process::Command::new("ffmpeg")
+            .args([
+                "-y", "-f", "lavfi", "-i",
+                "testsrc=duration=1:size=320x240:rate=10", "-pix_fmt", "yuv420p",
+            ])
+            .arg(&vid)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if !made {
+            eprintln!("ffmpeg недоступен — тест пропущен");
+            return;
+        }
+        let thumb = video_thumb(&vid).expect("кадр видео");
+        let decoded = image::ImageReader::open(&thumb).unwrap().decode().unwrap();
+        assert!(decoded.width() > 0 && decoded.height() > 0);
+        let _ = std::fs::remove_file(&vid);
+        let _ = std::fs::remove_file(&thumb);
+    }
 }
