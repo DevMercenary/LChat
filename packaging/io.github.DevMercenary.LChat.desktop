@@ -1,0 +1,14 @@
+[Desktop Entry]
+Type=Application
+Name=LChat
+GenericName=Local Network Chat
+GenericName[ru]=Локальный сетевой чат
+Comment=Peer-to-peer chat for text and files over the local network
+Comment[ru]=Локальный P2P-чат для обмена текстом и файлами по локальной сети
+Exec=lchat
+Icon=io.github.DevMercenary.LChat
+Terminal=false
+Categories=Network;Chat;InstantMessaging;
+Keywords=chat;lan;p2p;messaging;network;
+Keywords[ru]=чат;сеть;обмен;файлы;
+StartupNotify=true

@@ -47,6 +47,13 @@ IP вводить не нужно. Если автопоиск не срабат
 - **Windows 11:** `install.ps1` (правой кнопкой → «Выполнить с помощью PowerShell»)
   — соберёт `lchat.exe`, поставит в профиль и создаст ярлык в «Пуск».
 
+## Публикация и иконка
+
+Иконка приложения и метаданные для «центра приложений» (GNOME Software) —
+в папке [`packaging/`](packaging/). Там же инструкция по публикации в Flathub/COPR:
+[packaging/PUBLISHING.md](packaging/PUBLISHING.md). Пересобрать иконку:
+`python3 packaging/generate_icon.py`.
+
 ## Сборка вручную
 
 Нужен Rust (`rustup`). В папке проекта:

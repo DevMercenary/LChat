@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- LChat — иконка приложения. Совпадает с packaging/generate_icon.py -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3D7BE8"/>
+      <stop offset="1" stop-color="#6A45D9"/>
+    </linearGradient>
+  </defs>
+
+  <!-- фон: скруглённый квадрат с вертикальным градиентом -->
+  <rect x="0" y="0" width="512" height="512" rx="114" ry="114" fill="url(#bg)"/>
+
+  <!-- зелёный пузырь (собеседник) -->
+  <polygon points="140,278 140,340 198,280" fill="#2FCB6E"/>
+  <rect x="96" y="128" width="204" height="158" rx="44" ry="44" fill="#2FCB6E"/>
+
+  <!-- белый пузырь (я) поверх -->
+  <polygon points="374,364 374,426 318,366" fill="#FFFFFF"/>
+  <rect x="212" y="214" width="208" height="158" rx="44" ry="44" fill="#FFFFFF"/>
+
+  <!-- три точки «набор сообщения» -->
+  <circle cx="278" cy="293" r="15" fill="#6A45D9"/>
+  <circle cx="316" cy="293" r="15" fill="#6A45D9"/>
+  <circle cx="354" cy="293" r="15" fill="#6A45D9"/>
+</svg>

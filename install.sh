@@ -5,10 +5,13 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
+APPID="io.github.DevMercenary.LChat"
 BIN_DIR="$HOME/.local/bin"
-APP_DIR="$HOME/.local/share/applications"
+DATA="$HOME/.local/share"
+APP_DIR="$DATA/applications"
+ICONS="$DATA/icons/hicolor"
 BIN="$BIN_DIR/lchat"
-DESKTOP="$APP_DIR/lchat.desktop"
+DESKTOP="$APP_DIR/$APPID.desktop"
 
 echo "==> Сборка (release)…"
 cargo build --release
@@ -17,21 +20,39 @@ echo "==> Установка бинарника в $BIN"
 mkdir -p "$BIN_DIR" "$APP_DIR"
 install -m 755 target/release/lchat "$BIN"
 
+echo "==> Иконки приложения"
+for s in 16 32 48 64 128 256 512; do
+  src="packaging/icons/hicolor/${s}x${s}/apps/$APPID.png"
+  [ -f "$src" ] && install -Dm644 "$src" "$ICONS/${s}x${s}/apps/$APPID.png"
+done
+[ -f "packaging/icons/hicolor/scalable/apps/$APPID.svg" ] && \
+  install -Dm644 "packaging/icons/hicolor/scalable/apps/$APPID.svg" \
+    "$ICONS/scalable/apps/$APPID.svg"
+
+echo "==> Метаданные для «центра приложений» (AppStream)"
+install -Dm644 "packaging/$APPID.metainfo.xml" \
+  "$DATA/metainfo/$APPID.metainfo.xml"
+
 echo "==> Ярлык в меню приложений: $DESKTOP"
 cat > "$DESKTOP" <<EOF
 [Desktop Entry]
 Type=Application
 Name=LChat
+GenericName=Local Network Chat
 Comment=Локальный P2P-чат по локальной сети
 Exec=$BIN
+Icon=$APPID
 Terminal=false
-Categories=Network;Chat;
+Categories=Network;Chat;InstantMessaging;
+Keywords=chat;lan;p2p;чат;
 StartupNotify=true
 EOF
 
-# Обновляем базу .desktop, если утилита есть.
+# Обновляем базы .desktop и иконок, если утилиты есть.
 command -v update-desktop-database >/dev/null 2>&1 && \
   update-desktop-database "$APP_DIR" >/dev/null 2>&1 || true
+command -v gtk-update-icon-cache >/dev/null 2>&1 && \
+  gtk-update-icon-cache -f -t "$ICONS" >/dev/null 2>&1 || true
 
 echo
 echo "Готово. Запуск: lchat  (или из меню приложений «LChat»)."

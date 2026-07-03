@@ -3,6 +3,8 @@ name = "lchat"
 version = "0.1.0"
 edition = "2021"
 description = "Локальный P2P-чат для обмена текстом и файлами по локальной сети (Fedora <-> Windows 11)"
+license = "MIT"
+repository = "https://github.com/DevMercenary/LChat"
 
 [dependencies]
 eframe = "0.35"

@@ -1,0 +1,87 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.DevMercenary.LChat</id>
+
+  <name>LChat</name>
+  <summary>Peer-to-peer chat over the local network</summary>
+  <summary xml:lang="ru">Локальный P2P-чат по локальной сети</summary>
+
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <description>
+    <p>
+      LChat is a direct peer-to-peer chat for two computers on the same local
+      network. It exchanges text (copy-paste) and files without any servers,
+      accounts, or internet access.
+    </p>
+    <p xml:lang="ru">
+      LChat — прямой P2P-чат для двух компьютеров в одной локальной сети.
+      Обмен текстом (копипаста) и файлами без серверов, аккаунтов и интернета.
+    </p>
+    <p>Features:</p>
+    <p xml:lang="ru">Возможности:</p>
+    <ul>
+      <li>Direct encrypted connection (Noise, X25519 + ChaCha20-Poly1305) with a shared password</li>
+      <li xml:lang="ru">Прямое шифрованное соединение (Noise, X25519 + ChaCha20-Poly1305) по общему паролю</li>
+      <li>Automatic discovery of the other computer on the LAN — no manual IP needed</li>
+      <li xml:lang="ru">Автопоиск собеседника в локальной сети — IP вводить не нужно</li>
+      <li>Inline previews for images and text files, and video thumbnails</li>
+      <li xml:lang="ru">Предпросмотр картинок и текстовых файлов, миниатюры видео</li>
+      <li>Drag-and-drop of files, and paste of images/files from the clipboard</li>
+      <li xml:lang="ru">Drag-and-drop файлов и вставка картинок/файлов из буфера обмена</li>
+      <li>Optional saved chat history and launch on system startup</li>
+      <li xml:lang="ru">Опционально: сохранение истории чата и автозапуск при старте системы</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">io.github.DevMercenary.LChat.desktop</launchable>
+
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/DevMercenary/LChat/main/packaging/screenshots/main.png</image>
+      <caption>The main chat window</caption>
+      <caption xml:lang="ru">Главное окно чата</caption>
+    </screenshot>
+  </screenshots>
+
+  <url type="homepage">https://github.com/DevMercenary/LChat</url>
+  <url type="bugtracker">https://github.com/DevMercenary/LChat/issues</url>
+  <url type="vcs-browser">https://github.com/DevMercenary/LChat</url>
+
+  <developer id="io.github.devmercenary">
+    <name>DevMercenary</name>
+  </developer>
+
+  <!-- Чат = пользователи общаются напрямую -->
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-chat">intense</content_attribute>
+  </content_rating>
+
+  <categories>
+    <category>Network</category>
+    <category>Chat</category>
+    <category>InstantMessaging</category>
+  </categories>
+
+  <keywords>
+    <keyword>chat</keyword>
+    <keyword>lan</keyword>
+    <keyword>p2p</keyword>
+    <keyword>messaging</keyword>
+  </keywords>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#4a6bd8</color>
+    <color type="primary" scheme_preference="dark">#2a2350</color>
+  </branding>
+
+  <releases>
+    <release version="0.1.0" date="2026-07-03">
+      <description>
+        <p>First public release.</p>
+        <p xml:lang="ru">Первый публичный выпуск.</p>
+      </description>
+    </release>
+  </releases>
+</component>

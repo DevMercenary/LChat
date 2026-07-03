@@ -1,0 +1,60 @@
+# Flatpak-манифест LChat.
+#
+# Локальная сборка/установка для теста (нужен flatpak-builder):
+#   flatpak install flathub org.freedesktop.Platform//24.08 org.freedesktop.Sdk//24.08 \
+#     org.freedesktop.Sdk.Extension.rust-stable//24.08
+#   flatpak-builder --user --install --force-clean build-dir \
+#     packaging/io.github.DevMercenary.LChat.yaml
+#   flatpak run io.github.DevMercenary.LChat
+#
+# Для отправки в Flathub network во время сборки ЗАПРЕЩЁН: замени источник на git-тег
+# и подключи cargo-sources.json (см. PUBLISHING.md), а build-args --share=network убери.
+app-id: io.github.DevMercenary.LChat
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+sdk-extensions:
+  - org.freedesktop.Sdk.Extension.rust-stable
+command: lchat
+
+finish-args:
+  - --share=network            # прямые TCP/UDP соединения по локальной сети
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --share=ipc
+  - --device=dri
+  - --filesystem=home          # сохранение принятых файлов и выбор файлов для отправки
+
+build-options:
+  append-path: /usr/lib/sdk/rust-stable/bin
+  # Локальная сборка тянет crates из сети. Для Flathub — убрать и использовать
+  # cargo-sources.json (offline).
+  build-args:
+    - --share=network
+  env:
+    CARGO_HOME: /run/build/lchat/cargo
+
+modules:
+  - name: lchat
+    buildsystem: simple
+    build-commands:
+      - cargo build --release --locked
+      - install -Dm755 target/release/lchat /app/bin/lchat
+      - install -Dm644 packaging/io.github.DevMercenary.LChat.desktop
+          /app/share/applications/io.github.DevMercenary.LChat.desktop
+      - install -Dm644 packaging/io.github.DevMercenary.LChat.metainfo.xml
+          /app/share/metainfo/io.github.DevMercenary.LChat.metainfo.xml
+      - install -Dm644 packaging/icons/hicolor/scalable/apps/io.github.DevMercenary.LChat.svg
+          /app/share/icons/hicolor/scalable/apps/io.github.DevMercenary.LChat.svg
+      - for s in 16 32 48 64 128 256 512; do
+          install -Dm644 "packaging/icons/hicolor/${s}x${s}/apps/io.github.DevMercenary.LChat.png"
+            "/app/share/icons/hicolor/${s}x${s}/apps/io.github.DevMercenary.LChat.png";
+          done
+    sources:
+      # Локальный тест: берём текущую папку. Для Flathub заменить на:
+      #   - type: git
+      #     url: https://github.com/DevMercenary/LChat.git
+      #     tag: v0.1.0
+      #   - cargo-sources.json
+      - type: dir
+        path: ..
