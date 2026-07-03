@@ -11,7 +11,7 @@
 # и подключи cargo-sources.json (см. PUBLISHING.md), а build-args --share=network убери.
 app-id: io.github.DevMercenary.LChat
 runtime: org.freedesktop.Platform
-runtime-version: '24.08'
+runtime-version: '25.08'
 sdk: org.freedesktop.Sdk
 sdk-extensions:
   - org.freedesktop.Sdk.Extension.rust-stable
