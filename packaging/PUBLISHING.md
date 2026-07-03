@@ -55,30 +55,35 @@ flatpak run io.github.DevMercenary.LChat
 
 Манифест в этом виде собирает crates из сети (`--share=network`) — удобно для теста.
 
-### 2. Подготовить offline-источники (Flathub собирает без сети)
+### 2. Offline-источники — уже готовы
 
+Готовый к отправке комплект лежит в **`packaging/flathub/`**:
+- `io.github.DevMercenary.LChat.yaml` — манифест для Flathub (offline, git-тег `v0.1.0`
+  с пином коммита);
+- `cargo-sources.json` — все зависимости из `Cargo.lock` (1059 записей), сгенерированы
+  `flatpak-cargo-generator`.
+
+Пересоздать при обновлении версии:
 ```bash
-# генератор из репозитория flatpak-builder-tools
-python3 flatpak-cargo-generator.py Cargo.lock -o packaging/cargo-sources.json
+python3 flatpak-cargo-generator.py Cargo.lock -o packaging/flathub/cargo-sources.json
+# затем обновить tag/commit в packaging/flathub/io.github.DevMercenary.LChat.yaml
 ```
-
-Затем в `io.github.DevMercenary.LChat.yaml`:
-- убери блок `build-options.build-args: [--share=network]`;
-- в `sources` замени `type: dir` на git-тег и подключи сгенерированный список:
-  ```yaml
-  sources:
-    - type: git
-      url: https://github.com/DevMercenary/LChat.git
-      tag: v0.1.0
-    - cargo-sources.json
-  ```
 
 ### 3. Отправить в Flathub
 
-1. Форкни `github.com/flathub/flathub`, ветка `new-pr`.
-2. Добавь `io.github.DevMercenary.LChat.yaml` (+ `cargo-sources.json`).
+1. Форкни `github.com/flathub/flathub`, создай ветку `new-pr`.
+2. Скопируй в корень форка **оба** файла из `packaging/flathub/`:
+   `io.github.DevMercenary.LChat.yaml` и `cargo-sources.json`.
 3. Открой Pull Request → бот соберёт, ревьюер проверит. После мержа создаётся
-   отдельный репозиторий и приложение публикуется.
+   отдельный репозиторий и приложение публикуется в Flathub (и появляется в GNOME
+   Software на Fedora).
+
+> Перед PR полезно собрать локально (нужен `flatpak-builder`):
+> ```bash
+> flatpak-builder --user --install --force-clean build-dir \
+>   packaging/flathub/io.github.DevMercenary.LChat.yaml
+> flatpak run io.github.DevMercenary.LChat
+> ```
 
 Полное руководство: https://docs.flathub.org/docs/for-app-authors/submission
 
