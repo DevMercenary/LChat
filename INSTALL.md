@@ -41,6 +41,15 @@ sudo firewall-cmd --reload
 
 ## Windows 11
 
+### Просто скачать (без Rust) — рекомендуется
+
+Зайди в [Releases](https://github.com/DevMercenary/LChat/releases), скачай
+`LChat-windows-x86_64.zip`, распакуй и запусти `lchat.exe`. Rust ставить не нужно.
+Для ярлыка в «Пуск» запусти `install.ps1` из архива (правой кнопкой → «Выполнить
+с помощью PowerShell»).
+
+### Собрать из исходников
+
 1. Установи Rust: https://rust-lang.org → «rustup».
 2. Скопируй папку `LChat` на компьютер.
 3. Правой кнопкой по `install.ps1` → **«Выполнить с помощью PowerShell»**.

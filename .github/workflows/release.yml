@@ -1,0 +1,82 @@
+name: Release
+
+# Собирает готовые бинарники при пуше тега вида v1.2.3 и публикует их в Releases.
+# Ручной запуск (workflow_dispatch) собирает и кладёт в артефакты (без релиза).
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows (.exe)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $dir = "LChat-windows-x86_64"
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          Copy-Item target\release\lchat.exe $dir\
+          Copy-Item install.ps1,INSTALL.md,README.md,LICENSE $dir\
+          Compress-Archive -Path "$dir\*" -DestinationPath "$dir.zip" -Force
+
+      - name: Upload artifact (для ручного запуска)
+        uses: actions/upload-artifact@v4
+        with:
+          name: LChat-windows-x86_64
+          path: LChat-windows-x86_64.zip
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: LChat-windows-x86_64.zip
+
+  linux:
+    name: Linux (x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: System deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-3-dev libxkbcommon-dev libwayland-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libgl1-mesa-dev
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Package
+        run: |
+          dir=LChat-linux-x86_64
+          mkdir -p "$dir"
+          cp target/release/lchat install.sh INSTALL.md README.md LICENSE "$dir"/
+          cp -r packaging "$dir"/
+          tar czf "$dir.tar.gz" "$dir"
+
+      - name: Upload artifact (для ручного запуска)
+        uses: actions/upload-artifact@v4
+        with:
+          name: LChat-linux-x86_64
+          path: LChat-linux-x86_64.tar.gz
+
+      - name: Attach to release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: LChat-linux-x86_64.tar.gz
